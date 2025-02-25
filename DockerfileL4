@@ -1,0 +1,18 @@
+# (A) 指定 L4T base image (請依照你 Jetson 的 L4T/JetPack 版本調整 tag)
+FROM nvcr.io/nvidia/l4t-jetpack:r36.3.0
+
+# (B) 安裝 python3、pip3，並清理
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip nvidia-l4t-tegrastats \
+ && rm -rf /var/lib/apt/lists/*
+
+# (C) 安裝 prometheus_client (其他需求庫也可在這裡裝)
+RUN pip3 install prometheus_client
+
+# (D) 設定工作目錄，複製程式碼
+WORKDIR /app
+COPY tegrastats_exporter.py /app/
+
+# (E) ENTRYPOINT or CMD
+# 執行 python 腳本 (這裡假設腳本名叫 tegrastats_exporter.py)
+ENTRYPOINT ["python3", "/app/tegrastats_exporter.py"]
