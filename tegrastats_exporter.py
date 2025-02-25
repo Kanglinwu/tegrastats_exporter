@@ -3,6 +3,7 @@
 import re
 import subprocess
 import time
+import os
 from collections import defaultdict, deque
 from prometheus_client import start_http_server, Gauge
 # 讀取 .env 用
