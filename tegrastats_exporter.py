@@ -4,61 +4,87 @@ import re
 import subprocess
 import time
 import os
-from collections import defaultdict, deque
+from collections import defaultdict
 from prometheus_client import start_http_server, Gauge
-# 讀取 .env 用
-from dotenv import load_dotenv  
+from dotenv import load_dotenv  # 用於讀取 .env
 
-# 讀取當前目錄下 .env 的內容
 load_dotenv()
-# 取得 .env 裡的 HOSTNAME 值，若不存在就用 "unknown"
 MY_HOSTNAME = os.getenv("HOSTNAME", "unknown")
 
 ########################################
-# 1) 定義我們要對外暴露的 Prometheus 指標
+# 1) 定義 Prometheus 指標
 ########################################
 
-# CPU 使用率，帶 core label。因為最終我們會每 5 秒更新一次(平均值)。
-CPU_USAGE_GAUGE = Gauge("jetson_cpu_usage_percent", "Average CPU usage in percent over interval", ["core", "Hostname"])
+# CPU usage (per core)
+CPU_USAGE_GAUGE = Gauge("jetson_cpu_usage_percent",
+                        "Average CPU usage in percent over interval",
+                        ["core", "Hostname"])
 
-# GPU 使用率，取區間「最高值」
-GPU_USAGE_GAUGE = Gauge("jetson_gpu_usage_percent_max", "Max GPU usage in percent over interval", ["Hostname"])
+# GPU usage
+GPU_USAGE_GAUGE = Gauge("jetson_gpu_usage_percent_max",
+                        "Max GPU usage in percent over interval",
+                        ["Hostname"])
 
-# GPU 頻率，這裡示範取平均（也可改成區間最大/最後一筆等）
-GPU_FREQ_GAUGE  = Gauge("jetson_gpu_freq_mhz_avg", "Average GPU frequency in MHz over interval", ["Hostname"])
+# GPU freq
+GPU_FREQ_GAUGE = Gauge("jetson_gpu_freq_mhz_avg",
+                       "Average GPU frequency in MHz over interval",
+                       ["Hostname"])
 
-# RAM/Swap，示範取平均使用量
-RAM_USED_GAUGE = Gauge("jetson_ram_used_mb_avg", "Average used RAM in MB over interval", ["Hostname"])
-RAM_TOTAL_GAUGE = Gauge("jetson_ram_total_mb_avg", "Average total RAM in MB over interval", ["Hostname"])
-SWAP_USED_GAUGE = Gauge("jetson_swap_used_mb_avg", "Average used SWAP in MB over interval", ["Hostname"])
-SWAP_TOTAL_GAUGE= Gauge("jetson_swap_total_mb_avg", "Average total SWAP in MB over interval", ["Hostname"])
+# RAM / SWAP
+RAM_USED_GAUGE = Gauge("jetson_ram_used_mb_avg",
+                       "Average used RAM in MB over interval",
+                       ["Hostname"])
+RAM_TOTAL_GAUGE = Gauge("jetson_ram_total_mb_avg",
+                        "Average total RAM in MB over interval",
+                        ["Hostname"])
+SWAP_USED_GAUGE = Gauge("jetson_swap_used_mb_avg",
+                        "Average used SWAP in MB over interval",
+                        ["Hostname"])
+SWAP_TOTAL_GAUGE = Gauge("jetson_swap_total_mb_avg",
+                         "Average total SWAP in MB over interval",
+                         ["Hostname"])
+
+# === 新增：GPU 溫度、各 Rail 功耗 (取平均) ===
+JETSON_GPU_TEMP_C = Gauge("jetson_gpu_temp_c_avg",
+                          "Average GPU temperature in Celsius over interval",
+                          ["Hostname"])
+
+JETSON_POWER_VDD_IN_W = Gauge("jetson_power_vdd_in_w_avg",
+                              "Average power usage of VDD_IN (W) over interval",
+                              ["Hostname"])
+JETSON_POWER_VDD_CPU_GPU_CV_W = Gauge("jetson_power_vdd_cpu_gpu_cv_w_avg",
+                                      "Average power usage of VDD_CPU_GPU_CV (W) over interval",
+                                      ["Hostname"])
+JETSON_POWER_VDD_SOC_W = Gauge("jetson_power_vdd_soc_w_avg",
+                               "Average power usage of VDD_SOC (W) over interval",
+                               ["Hostname"])
 
 
 ########################################
-# 2) 建立一個暫存結構，存放區間內(例如 5 秒)的資料
+# 2) Aggregator，存放區間資料並在 flush 時做平均 / 最大值
 ########################################
 class MetricsAggregator:
     def __init__(self, interval=5.0):
-        """
-        interval: 幾秒做一次彙整/更新 Prometheus
-        """
         self.interval = interval
         self.reset()
 
     def reset(self):
-        # 記錄開始時間
         self.start_time = time.time()
 
-        # CPU usage: 用 {core_id: [usage, usage, ...]} 來暫存
         self.cpu_usage_records = defaultdict(list)
-        # GPU usage 與 freq：各是一個 list，可能之後要取 max / avg
         self.gpu_usage_records = []
         self.gpu_freq_records = []
-        # RAM / SWAP
+
         self.ram_used_records = []
         self.ram_total_records = []
         self.swap_used_records = []
         self.swap_total_records = []
+
+        # 新增：暫存 GPU Temp、電源功耗
+        self.gpu_temp_records = []
+        self.vdd_in_records = []
+        self.vdd_cpu_gpu_cv_records = []
+        self.vdd_soc_records = []
 
     def add_cpu_usage(self, core_idx, usage):
         self.cpu_usage_records[core_idx].append(usage)
@@ -77,59 +103,65 @@ class MetricsAggregator:
         self.swap_used_records.append(used)
         self.swap_total_records.append(total)
 
+    # 新增：方法以記錄 GPU Temp, VDD_IN, ...
+    def add_gpu_temp(self, temp_c):
+        self.gpu_temp_records.append(temp_c)
+
+    def add_vdd_in(self, w):
+        self.vdd_in_records.append(w)
+
+    def add_vdd_cpu_gpu_cv(self, w):
+        self.vdd_cpu_gpu_cv_records.append(w)
+
+    def add_vdd_soc(self, w):
+        self.vdd_soc_records.append(w)
+
     def should_flush(self):
-        """檢查是否已到達 interval，若超過就回傳 True"""
         return (time.time() - self.start_time) >= self.interval
 
     def flush_to_prometheus(self):
-        """
-        每次到達 interval 時，做彙整 (平均 / 最大 / 其他邏輯)，
-        然後更新到對應的 Prometheus Gauge。
-        """
-        # 1) CPU usage: 取該段時間的「平均」
+        # 1) CPU usage => 取平均
         for core_idx, usage_list in self.cpu_usage_records.items():
-            if usage_list:
-                avg_usage = sum(usage_list) / len(usage_list)
-            else:
-                avg_usage = 0
+            avg_usage = sum(usage_list)/len(usage_list) if usage_list else 0
             CPU_USAGE_GAUGE.labels(core=str(core_idx), Hostname=MY_HOSTNAME).set(avg_usage)
 
-        # 2) GPU usage: 這裡示範取「最高值」
-        if self.gpu_usage_records:
-            max_gpu_usage = max(self.gpu_usage_records)
-        else:
-            max_gpu_usage = 0
+        # 2) GPU usage => 最大值
+        max_gpu_usage = max(self.gpu_usage_records) if self.gpu_usage_records else 0
         GPU_USAGE_GAUGE.labels(Hostname=MY_HOSTNAME).set(max_gpu_usage)
 
-        # 3) GPU freq: 取「平均」
-        if self.gpu_freq_records:
-            avg_gpu_freq = sum(self.gpu_freq_records) / len(self.gpu_freq_records)
-        else:
-            avg_gpu_freq = 0
+        # 3) GPU freq => 平均
+        avg_gpu_freq = sum(self.gpu_freq_records)/len(self.gpu_freq_records) if self.gpu_freq_records else 0
         GPU_FREQ_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_gpu_freq)
 
-        # 4) RAM/Swap: 取「平均」
-        def average_of_list(lst):
-            return sum(lst) / len(lst) if lst else 0
+        # 4) RAM / SWAP => 平均
+        def avg_list(lst):
+            return sum(lst)/len(lst) if lst else 0
 
-        RAM_USED_GAUGE.labels(Hostname=MY_HOSTNAME).set(average_of_list(self.ram_used_records))
-        RAM_TOTAL_GAUGE.labels(Hostname=MY_HOSTNAME).set(average_of_list(self.ram_total_records))
-        SWAP_USED_GAUGE.labels(Hostname=MY_HOSTNAME).set(average_of_list(self.swap_used_records))
-        SWAP_TOTAL_GAUGE.labels(Hostname=MY_HOSTNAME).set(average_of_list(self.swap_total_records))
+        RAM_USED_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_list(self.ram_used_records))
+        RAM_TOTAL_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_list(self.ram_total_records))
+        SWAP_USED_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_list(self.swap_used_records))
+        SWAP_TOTAL_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_list(self.swap_total_records))
 
-        # 最後重置，以便進入下一個 interval
+        # 新增： GPU Temp => 平均
+        avg_temp = avg_list(self.gpu_temp_records)
+        JETSON_GPU_TEMP_C.labels(Hostname=MY_HOSTNAME).set(avg_temp)
+
+        # 新增： VDD_IN / VDD_CPU_GPU_CV / VDD_SOC => 平均
+        JETSON_POWER_VDD_IN_W.labels(Hostname=MY_HOSTNAME).set(avg_list(self.vdd_in_records))
+        JETSON_POWER_VDD_CPU_GPU_CV_W.labels(Hostname=MY_HOSTNAME).set(avg_list(self.vdd_cpu_gpu_cv_records))
+        JETSON_POWER_VDD_SOC_W.labels(Hostname=MY_HOSTNAME).set(avg_list(self.vdd_soc_records))
+
+        # reset for next interval
         self.reset()
 
 
 ########################################
-# 3) 解析 tegrastats 每行輸出，存入 MetricsAggregator
+# 3) parse tegrastats line，新增溫度 & 電源解析
 ########################################
 def parse_tegrastats_line(line, aggregator: MetricsAggregator):
-    """
-    line 範例:
-      RAM 3164/7620MB (lfb 29x4MB) SWAP 51/3810MB (cached 0MB) CPU [37%@1344,34%@1344,25%@1344,64%@1344,99%@1344,15%@1344] GR3D_FREQ 0%
-      cpu@57.125C soc2@55.156C ...
-    """
+    # e.g.:
+    # RAM 3121/7620MB ... CPU [xx%@xx,...] GR3D_FREQ 0% cpu@57.625C ... gpu@57.906C ...
+    # VDD_IN 9349mW/9349mW VDD_CPU_GPU_CV 2764mW/2764mW VDD_SOC 2768mW/2768mW
 
     # 1) RAM
     m_ram = re.search(r"RAM\s+(\d+)/(\d+)MB", line)
@@ -145,7 +177,7 @@ def parse_tegrastats_line(line, aggregator: MetricsAggregator):
         total = float(m_swap.group(2))
         aggregator.add_swap(used, total)
 
-    # 3) CPU usage e.g. "CPU [37%@1344,34%@1344,25%@1344,...]"
+    # 3) CPU usage
     cpu_block = re.search(r"CPU \[(.*?)\]", line)
     if cpu_block:
         cores_str = cpu_block.group(1).split(",")
@@ -159,45 +191,59 @@ def parse_tegrastats_line(line, aggregator: MetricsAggregator):
                     usage = float(m_core.group(1))
                     aggregator.add_cpu_usage(idx, usage)
 
-    # 4) GPU usage & freq e.g. "GR3D_FREQ 89%"
-    # 有時還會帶 "@998" 頻率： "GR3D_FREQ 89%@998"
+    # 4) GPU usage & freq => e.g. "GR3D_FREQ 0%" or "GR3D_FREQ 89%@998"
     m_gpu = re.search(r"GR3D_FREQ\s+(\d+)%(@(\d+))?", line)
     if m_gpu:
         usage = float(m_gpu.group(1))
         aggregator.add_gpu_usage(usage)
-        # 如果有擷取到頻率
-        freq_str = m_gpu.group(3)  # 第三個 capture group
-        if freq_str:
+        freq_str = m_gpu.group(3)
+        if freq_str:  # means there's a number after '@'
             aggregator.add_gpu_freq(float(freq_str))
-        else:
-            # 也可能這行沒印 freq，你可視情況決定是否保留舊值或不紀錄
-            pass
+
+    # 5) GPU temp => parse e.g. "gpu@57.906C"
+    m_gpu_temp = re.search(r"gpu@(\d+(\.\d+)?)C", line)
+    if m_gpu_temp:
+        temp_c = float(m_gpu_temp.group(1))
+        aggregator.add_gpu_temp(temp_c)
+
+    # 6) VDD_IN => parse e.g. "VDD_IN 9349mW/9349mW"
+    #    只取第一個 (即時值) => 9349 -> 9.349W
+    m_vdd_in = re.search(r"VDD_IN\s+(\d+)mW/", line)
+    if m_vdd_in:
+        w_in = float(m_vdd_in.group(1)) / 1000.0
+        aggregator.add_vdd_in(w_in)
+
+    # 7) VDD_CPU_GPU_CV => parse e.g. "VDD_CPU_GPU_CV 2764mW/2764mW"
+    m_vdd_cpu_gpu_cv = re.search(r"VDD_CPU_GPU_CV\s+(\d+)mW/", line)
+    if m_vdd_cpu_gpu_cv:
+        w_cpu_gpu_cv = float(m_vdd_cpu_gpu_cv.group(1)) / 1000.0
+        aggregator.add_vdd_cpu_gpu_cv(w_cpu_gpu_cv)
+
+    # 8) VDD_SOC => parse e.g. "VDD_SOC 2768mW/2768mW"
+    m_vdd_soc = re.search(r"VDD_SOC\s+(\d+)mW/", line)
+    if m_vdd_soc:
+        w_soc = float(m_vdd_soc.group(1)) / 1000.0
+        aggregator.add_vdd_soc(w_soc)
 
 
 ########################################
-# 4) 主程式：啟動 Prometheus server, 執行 tegrastats, 每秒讀一行
+# 4) 主程式
 ########################################
 def main():
-    # (a) 啟動 Prometheus HTTP server
     start_http_server(8000)
     print("Tegrastats Exporter (with aggregator) is running on port 8000...")
 
-    # (b) 建立 aggregator，設定「每 5 秒 flush 一次」
-    aggregator = MetricsAggregator(interval=10.0)
+    aggregator = MetricsAggregator(interval=5.0)
 
-    # (c) 以 subprocess 執行 tegrastats，1秒間隔
     popen = subprocess.Popen(["tegrastats", "--interval", "1000"],
                              stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT,
                              universal_newlines=True)
-
     try:
         for line in popen.stdout:
             line = line.strip()
-            # 解析並暫存
             parse_tegrastats_line(line, aggregator)
 
-            # 每行都檢查是否到達 flush 時間
             if aggregator.should_flush():
                 aggregator.flush_to_prometheus()
 
