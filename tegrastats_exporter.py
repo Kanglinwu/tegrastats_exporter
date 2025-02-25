@@ -5,25 +5,32 @@ import subprocess
 import time
 from collections import defaultdict, deque
 from prometheus_client import start_http_server, Gauge
+# 讀取 .env 用
+from dotenv import load_dotenv  
+
+# 讀取當前目錄下 .env 的內容
+load_dotenv()
+# 取得 .env 裡的 HOSTNAME 值，若不存在就用 "unknown"
+MY_HOSTNAME = os.getenv("HOSTNAME", "unknown")
 
 ########################################
 # 1) 定義我們要對外暴露的 Prometheus 指標
 ########################################
 
 # CPU 使用率，帶 core label。因為最終我們會每 5 秒更新一次(平均值)。
-CPU_USAGE_GAUGE = Gauge("jetson_cpu_usage_percent", "Average CPU usage in percent over interval", ["core"])
+CPU_USAGE_GAUGE = Gauge("jetson_cpu_usage_percent", "Average CPU usage in percent over interval", ["core", "Hostname"])
 
 # GPU 使用率，取區間「最高值」
-GPU_USAGE_GAUGE = Gauge("jetson_gpu_usage_percent_max", "Max GPU usage in percent over interval")
+GPU_USAGE_GAUGE = Gauge("jetson_gpu_usage_percent_max", "Max GPU usage in percent over interval", ["Hostname"])
 
 # GPU 頻率，這裡示範取平均（也可改成區間最大/最後一筆等）
-GPU_FREQ_GAUGE  = Gauge("jetson_gpu_freq_mhz_avg", "Average GPU frequency in MHz over interval")
+GPU_FREQ_GAUGE  = Gauge("jetson_gpu_freq_mhz_avg", "Average GPU frequency in MHz over interval", ["Hostname"])
 
 # RAM/Swap，示範取平均使用量
-RAM_USED_GAUGE = Gauge("jetson_ram_used_mb_avg", "Average used RAM in MB over interval")
-RAM_TOTAL_GAUGE = Gauge("jetson_ram_total_mb_avg", "Average total RAM in MB over interval")
-SWAP_USED_GAUGE = Gauge("jetson_swap_used_mb_avg", "Average used SWAP in MB over interval")
-SWAP_TOTAL_GAUGE= Gauge("jetson_swap_total_mb_avg", "Average total SWAP in MB over interval")
+RAM_USED_GAUGE = Gauge("jetson_ram_used_mb_avg", "Average used RAM in MB over interval", ["Hostname"])
+RAM_TOTAL_GAUGE = Gauge("jetson_ram_total_mb_avg", "Average total RAM in MB over interval", ["Hostname"])
+SWAP_USED_GAUGE = Gauge("jetson_swap_used_mb_avg", "Average used SWAP in MB over interval", ["Hostname"])
+SWAP_TOTAL_GAUGE= Gauge("jetson_swap_total_mb_avg", "Average total SWAP in MB over interval", ["Hostname"])
 
 
 ########################################
@@ -84,30 +91,30 @@ class MetricsAggregator:
                 avg_usage = sum(usage_list) / len(usage_list)
             else:
                 avg_usage = 0
-            CPU_USAGE_GAUGE.labels(core=str(core_idx)).set(avg_usage)
+            CPU_USAGE_GAUGE.labels(core=str(core_idx), Hostname=MY_HOSTNAME).set(avg_usage)
 
         # 2) GPU usage: 這裡示範取「最高值」
         if self.gpu_usage_records:
             max_gpu_usage = max(self.gpu_usage_records)
         else:
             max_gpu_usage = 0
-        GPU_USAGE_GAUGE.set(max_gpu_usage)
+        GPU_USAGE_GAUGE.labels(Hostname=MY_HOSTNAME).set(max_gpu_usage)
 
         # 3) GPU freq: 取「平均」
         if self.gpu_freq_records:
             avg_gpu_freq = sum(self.gpu_freq_records) / len(self.gpu_freq_records)
         else:
             avg_gpu_freq = 0
-        GPU_FREQ_GAUGE.set(avg_gpu_freq)
+        GPU_FREQ_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_gpu_freq)
 
         # 4) RAM/Swap: 取「平均」
         def average_of_list(lst):
             return sum(lst) / len(lst) if lst else 0
 
-        RAM_USED_GAUGE.set(average_of_list(self.ram_used_records))
-        RAM_TOTAL_GAUGE.set(average_of_list(self.ram_total_records))
-        SWAP_USED_GAUGE.set(average_of_list(self.swap_used_records))
-        SWAP_TOTAL_GAUGE.set(average_of_list(self.swap_total_records))
+        RAM_USED_GAUGE.labels(Hostname=MY_HOSTNAME).set(average_of_list(self.ram_used_records))
+        RAM_TOTAL_GAUGE.labels(Hostname=MY_HOSTNAME).set(average_of_list(self.ram_total_records))
+        SWAP_USED_GAUGE.labels(Hostname=MY_HOSTNAME).set(average_of_list(self.swap_used_records))
+        SWAP_TOTAL_GAUGE.labels(Hostname=MY_HOSTNAME).set(average_of_list(self.swap_total_records))
 
         # 最後重置，以便進入下一個 interval
         self.reset()
