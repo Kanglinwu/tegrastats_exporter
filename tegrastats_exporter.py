@@ -11,20 +11,38 @@ from dotenv import load_dotenv  # 用於讀取 .env
 load_dotenv()
 MY_HOSTNAME = os.getenv("HOSTNAME", "unknown")
 
-def avg_list(lst):
-    """回傳清單內數值的平均值，若 lst 為空則回傳 0"""
-    if not lst:
-        return 0
-    return sum(lst) / len(lst)
-
 ########################################
 # 1) 定義 Prometheus 指標
 ########################################
+
+# CPU usage (per core)
+CPU_USAGE_GAUGE = Gauge("jetson_cpu_usage_percent",
+                        "Average CPU usage in percent over interval",
+                        ["core", "Hostname"])
 
 # GPU usage
 GPU_USAGE_GAUGE = Gauge("jetson_gpu_usage_percent_max",
                         "Max GPU usage in percent over interval",
                         ["Hostname"])
+
+# GPU freq
+GPU_FREQ_GAUGE = Gauge("jetson_gpu_freq_mhz_avg",
+                       "Average GPU frequency in MHz over interval",
+                       ["Hostname"])
+
+# RAM / SWAP
+RAM_USED_GAUGE = Gauge("jetson_ram_used_mb_avg",
+                       "Average used RAM in MB over interval",
+                       ["Hostname"])
+RAM_TOTAL_GAUGE = Gauge("jetson_ram_total_mb_avg",
+                        "Average total RAM in MB over interval",
+                        ["Hostname"])
+SWAP_USED_GAUGE = Gauge("jetson_swap_used_mb_avg",
+                        "Average used SWAP in MB over interval",
+                        ["Hostname"])
+SWAP_TOTAL_GAUGE = Gauge("jetson_swap_total_mb_avg",
+                         "Average total SWAP in MB over interval",
+                         ["Hostname"])
 
 # === 新增：GPU 溫度、各 Rail 功耗 (取平均) ===
 JETSON_GPU_TEMP_C = Gauge("jetson_gpu_temp_c_avg",
@@ -102,9 +120,27 @@ class MetricsAggregator:
         return (time.time() - self.start_time) >= self.interval
 
     def flush_to_prometheus(self):
+        # 1) CPU usage => 取平均
+        for core_idx, usage_list in self.cpu_usage_records.items():
+            avg_usage = sum(usage_list)/len(usage_list) if usage_list else 0
+            CPU_USAGE_GAUGE.labels(core=str(core_idx), Hostname=MY_HOSTNAME).set(avg_usage)
+
         # 2) GPU usage => 最大值
         max_gpu_usage = max(self.gpu_usage_records) if self.gpu_usage_records else 0
         GPU_USAGE_GAUGE.labels(Hostname=MY_HOSTNAME).set(max_gpu_usage)
+
+        # 3) GPU freq => 平均
+        avg_gpu_freq = sum(self.gpu_freq_records)/len(self.gpu_freq_records) if self.gpu_freq_records else 0
+        GPU_FREQ_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_gpu_freq)
+
+        # 4) RAM / SWAP => 平均
+        def avg_list(lst):
+            return sum(lst)/len(lst) if lst else 0
+
+        RAM_USED_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_list(self.ram_used_records))
+        RAM_TOTAL_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_list(self.ram_total_records))
+        SWAP_USED_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_list(self.swap_used_records))
+        SWAP_TOTAL_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_list(self.swap_total_records))
 
         # 新增： GPU Temp => 平均
         avg_temp = avg_list(self.gpu_temp_records)
