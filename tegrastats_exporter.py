@@ -163,10 +163,18 @@ class MetricsAggregator:
         def avg_list(lst):
             return sum(lst) / len(lst) if lst else 0
 
+        # 1-1) CPU usage => 取平均
+        total_cpu_usage = []  # 用來存儲所有 core 的數據
+
         # 1) CPU usage => 取平均
         for core_idx, usage_list in self.cpu_usage_records.items():
             avg_usage = avg_list(usage_list)
             CPU_USAGE_GAUGE.labels(core=str(core_idx), Hostname=MY_HOSTNAME).set(avg_usage)
+            total_cpu_usage.extend(usage_list)  # 把每個 core 的使用率加入總體計算
+
+        # 計算整體 CPU 平均使用率
+        avg_total_cpu_usage = avg_list(total_cpu_usage)
+        CPU_USAGE_GAUGE.labels(core="total", Hostname=MY_HOSTNAME).set(avg_total_cpu_usage)
 
         # 2) GPU usage => 最大值
         max_gpu_usage = max(self.gpu_usage_records) if self.gpu_usage_records else 0
