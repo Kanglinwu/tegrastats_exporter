@@ -44,11 +44,27 @@ SWAP_TOTAL_GAUGE = Gauge("jetson_swap_total_mb_avg",
                          "Average total SWAP in MB over interval",
                          ["Hostname"])
 
-# === 新增：GPU 溫度、各 Rail 功耗 (取平均) ===
+# =========== 新增多種溫度 ===========
 JETSON_GPU_TEMP_C = Gauge("jetson_gpu_temp_c_avg",
                           "Average GPU temperature in Celsius over interval",
                           ["Hostname"])
+JETSON_CPU_TEMP_C = Gauge("jetson_cpu_temp_c_avg",
+                          "Average CPU temperature in Celsius over interval",
+                          ["Hostname"])
+JETSON_SOC0_TEMP_C = Gauge("jetson_soc0_temp_c_avg",
+                           "Average soc0 temperature in Celsius over interval",
+                           ["Hostname"])
+JETSON_SOC1_TEMP_C = Gauge("jetson_soc1_temp_c_avg",
+                           "Average soc1 temperature in Celsius over interval",
+                           ["Hostname"])
+JETSON_SOC2_TEMP_C = Gauge("jetson_soc2_temp_c_avg",
+                           "Average soc2 temperature in Celsius over interval",
+                           ["Hostname"])
+JETSON_TJ_TEMP_C = Gauge("jetson_tj_temp_c_avg",
+                         "Average tj temperature in Celsius over interval",
+                         ["Hostname"])
 
+# Rail 功耗
 JETSON_POWER_VDD_IN_W = Gauge("jetson_power_vdd_in_w_avg",
                               "Average power usage of VDD_IN (W) over interval",
                               ["Hostname"])
@@ -61,7 +77,7 @@ JETSON_POWER_VDD_SOC_W = Gauge("jetson_power_vdd_soc_w_avg",
 
 
 ########################################
-# 2) Aggregator，存放區間資料並在 flush 時做平均 / 最大值
+# 2) Aggregator: 每個傳感器 / 欄位都對應一個 list
 ########################################
 class MetricsAggregator:
     def __init__(self, interval=5.0):
@@ -80,12 +96,20 @@ class MetricsAggregator:
         self.swap_used_records = []
         self.swap_total_records = []
 
-        # 新增：暫存 GPU Temp、電源功耗
+        # =========== 新增：暫存各種溫度 ===========
         self.gpu_temp_records = []
+        self.cpu_temp_records = []
+        self.soc0_temp_records = []
+        self.soc1_temp_records = []
+        self.soc2_temp_records = []
+        self.tj_temp_records = []
+
+        # Rail Power
         self.vdd_in_records = []
         self.vdd_cpu_gpu_cv_records = []
         self.vdd_soc_records = []
 
+    # ---- Usage / freq / ram / swap ----
     def add_cpu_usage(self, core_idx, usage):
         self.cpu_usage_records[core_idx].append(usage)
 
@@ -103,10 +127,26 @@ class MetricsAggregator:
         self.swap_used_records.append(used)
         self.swap_total_records.append(total)
 
-    # 新增：方法以記錄 GPU Temp, VDD_IN, ...
+    # ---- 溫度 ----
     def add_gpu_temp(self, temp_c):
         self.gpu_temp_records.append(temp_c)
 
+    def add_cpu_temp(self, temp_c):
+        self.cpu_temp_records.append(temp_c)
+
+    def add_soc0_temp(self, temp_c):
+        self.soc0_temp_records.append(temp_c)
+
+    def add_soc1_temp(self, temp_c):
+        self.soc1_temp_records.append(temp_c)
+
+    def add_soc2_temp(self, temp_c):
+        self.soc2_temp_records.append(temp_c)
+
+    def add_tj_temp(self, temp_c):
+        self.tj_temp_records.append(temp_c)
+
+    # ---- Power ----
     def add_vdd_in(self, w):
         self.vdd_in_records.append(w)
 
@@ -120,9 +160,12 @@ class MetricsAggregator:
         return (time.time() - self.start_time) >= self.interval
 
     def flush_to_prometheus(self):
+        def avg_list(lst):
+            return sum(lst) / len(lst) if lst else 0
+
         # 1) CPU usage => 取平均
         for core_idx, usage_list in self.cpu_usage_records.items():
-            avg_usage = sum(usage_list)/len(usage_list) if usage_list else 0
+            avg_usage = avg_list(usage_list)
             CPU_USAGE_GAUGE.labels(core=str(core_idx), Hostname=MY_HOSTNAME).set(avg_usage)
 
         # 2) GPU usage => 最大值
@@ -130,38 +173,39 @@ class MetricsAggregator:
         GPU_USAGE_GAUGE.labels(Hostname=MY_HOSTNAME).set(max_gpu_usage)
 
         # 3) GPU freq => 平均
-        avg_gpu_freq = sum(self.gpu_freq_records)/len(self.gpu_freq_records) if self.gpu_freq_records else 0
+        avg_gpu_freq = avg_list(self.gpu_freq_records)
         GPU_FREQ_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_gpu_freq)
 
         # 4) RAM / SWAP => 平均
-        def avg_list(lst):
-            return sum(lst)/len(lst) if lst else 0
-
         RAM_USED_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_list(self.ram_used_records))
         RAM_TOTAL_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_list(self.ram_total_records))
         SWAP_USED_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_list(self.swap_used_records))
         SWAP_TOTAL_GAUGE.labels(Hostname=MY_HOSTNAME).set(avg_list(self.swap_total_records))
 
-        # 新增： GPU Temp => 平均
-        avg_temp = avg_list(self.gpu_temp_records)
-        JETSON_GPU_TEMP_C.labels(Hostname=MY_HOSTNAME).set(avg_temp)
+        # =========== Flush 多種溫度 ===========
+        JETSON_GPU_TEMP_C.labels(Hostname=MY_HOSTNAME).set(avg_list(self.gpu_temp_records))
+        JETSON_CPU_TEMP_C.labels(Hostname=MY_HOSTNAME).set(avg_list(self.cpu_temp_records))
+        JETSON_SOC0_TEMP_C.labels(Hostname=MY_HOSTNAME).set(avg_list(self.soc0_temp_records))
+        JETSON_SOC1_TEMP_C.labels(Hostname=MY_HOSTNAME).set(avg_list(self.soc1_temp_records))
+        JETSON_SOC2_TEMP_C.labels(Hostname=MY_HOSTNAME).set(avg_list(self.soc2_temp_records))
+        JETSON_TJ_TEMP_C.labels(Hostname=MY_HOSTNAME).set(avg_list(self.tj_temp_records))
 
-        # 新增： VDD_IN / VDD_CPU_GPU_CV / VDD_SOC => 平均
+        # Rails
         JETSON_POWER_VDD_IN_W.labels(Hostname=MY_HOSTNAME).set(avg_list(self.vdd_in_records))
         JETSON_POWER_VDD_CPU_GPU_CV_W.labels(Hostname=MY_HOSTNAME).set(avg_list(self.vdd_cpu_gpu_cv_records))
         JETSON_POWER_VDD_SOC_W.labels(Hostname=MY_HOSTNAME).set(avg_list(self.vdd_soc_records))
 
-        # reset for next interval
         self.reset()
 
 
 ########################################
-# 3) parse tegrastats line，新增溫度 & 電源解析
+# 3) 解析 tegrastats 輸出，匹配溫度
 ########################################
 def parse_tegrastats_line(line, aggregator: MetricsAggregator):
-    # e.g.:
-    # RAM 3121/7620MB ... CPU [xx%@xx,...] GR3D_FREQ 0% cpu@57.625C ... gpu@57.906C ...
-    # VDD_IN 9349mW/9349mW VDD_CPU_GPU_CV 2764mW/2764mW VDD_SOC 2768mW/2768mW
+    # e.g:
+    # cpu@58.875C soc2@56.781C soc0@57.75C gpu@58.843C tj@58.875C soc1@58.875C
+    # ...
+    # 你也可以把 parse 拆成好幾個 re.search()
 
     # 1) RAM
     m_ram = re.search(r"RAM\s+(\d+)/(\d+)MB", line)
@@ -197,33 +241,46 @@ def parse_tegrastats_line(line, aggregator: MetricsAggregator):
         usage = float(m_gpu.group(1))
         aggregator.add_gpu_usage(usage)
         freq_str = m_gpu.group(3)
-        if freq_str:  # means there's a number after '@'
+        if freq_str:
             aggregator.add_gpu_freq(float(freq_str))
 
-    # 5) GPU temp => parse e.g. "gpu@57.906C"
+    # 5) 各種溫度: cpu@xxC, gpu@xxC, soc0@xxC, soc1@xxC, soc2@xxC, tj@xxC
+    m_cpu_temp = re.search(r"cpu@(\d+(\.\d+)?)C", line)
+    if m_cpu_temp:
+        aggregator.add_cpu_temp(float(m_cpu_temp.group(1)))
+
     m_gpu_temp = re.search(r"gpu@(\d+(\.\d+)?)C", line)
     if m_gpu_temp:
-        temp_c = float(m_gpu_temp.group(1))
-        aggregator.add_gpu_temp(temp_c)
+        aggregator.add_gpu_temp(float(m_gpu_temp.group(1)))
 
-    # 6) VDD_IN => parse e.g. "VDD_IN 9349mW/9349mW"
-    #    只取第一個 (即時值) => 9349 -> 9.349W
+    m_soc0_temp = re.search(r"soc0@(\d+(\.\d+)?)C", line)
+    if m_soc0_temp:
+        aggregator.add_soc0_temp(float(m_soc0_temp.group(1)))
+
+    m_soc1_temp = re.search(r"soc1@(\d+(\.\d+)?)C", line)
+    if m_soc1_temp:
+        aggregator.add_soc1_temp(float(m_soc1_temp.group(1)))
+
+    m_soc2_temp = re.search(r"soc2@(\d+(\.\d+)?)C", line)
+    if m_soc2_temp:
+        aggregator.add_soc2_temp(float(m_soc2_temp.group(1)))
+
+    m_tj_temp = re.search(r"tj@(\d+(\.\d+)?)C", line)
+    if m_tj_temp:
+        aggregator.add_tj_temp(float(m_tj_temp.group(1)))
+
+    # 6) Rail Power
     m_vdd_in = re.search(r"VDD_IN\s+(\d+)mW/", line)
     if m_vdd_in:
-        w_in = float(m_vdd_in.group(1)) / 1000.0
-        aggregator.add_vdd_in(w_in)
+        aggregator.add_vdd_in(float(m_vdd_in.group(1)) / 1000.0)
 
-    # 7) VDD_CPU_GPU_CV => parse e.g. "VDD_CPU_GPU_CV 2764mW/2764mW"
     m_vdd_cpu_gpu_cv = re.search(r"VDD_CPU_GPU_CV\s+(\d+)mW/", line)
     if m_vdd_cpu_gpu_cv:
-        w_cpu_gpu_cv = float(m_vdd_cpu_gpu_cv.group(1)) / 1000.0
-        aggregator.add_vdd_cpu_gpu_cv(w_cpu_gpu_cv)
+        aggregator.add_vdd_cpu_gpu_cv(float(m_vdd_cpu_gpu_cv.group(1)) / 1000.0)
 
-    # 8) VDD_SOC => parse e.g. "VDD_SOC 2768mW/2768mW"
     m_vdd_soc = re.search(r"VDD_SOC\s+(\d+)mW/", line)
     if m_vdd_soc:
-        w_soc = float(m_vdd_soc.group(1)) / 1000.0
-        aggregator.add_vdd_soc(w_soc)
+        aggregator.add_vdd_soc(float(m_vdd_soc.group(1)) / 1000.0)
 
 
 ########################################
@@ -235,6 +292,7 @@ def main():
 
     aggregator = MetricsAggregator(interval=5.0)
 
+    # tegrastats 每 1 秒輸出一行
     popen = subprocess.Popen(["tegrastats", "--interval", "1000"],
                              stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT,
