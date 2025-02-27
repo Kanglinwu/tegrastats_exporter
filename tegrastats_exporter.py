@@ -4,6 +4,7 @@ import re
 import subprocess
 import time
 import os
+import psutil  # 用於獲取磁碟資訊
 from collections import defaultdict
 from prometheus_client import start_http_server, Gauge
 from dotenv import load_dotenv  # 用於讀取 .env
@@ -75,6 +76,16 @@ JETSON_POWER_VDD_SOC_W = Gauge("jetson_power_vdd_soc_w_avg",
                                "Average power usage of VDD_SOC (W) over interval",
                                ["Hostname"])
 
+# 磁碟使用率
+DISK_USAGE_GAUGE = Gauge("jetson_disk_usage_percent",
+                         "Disk usage in percent",
+                         ["mount", "Hostname"])
+DISK_USED_GAUGE = Gauge("jetson_disk_used_mb",
+                        "Disk used space in MB",
+                        ["mount", "Hostname"])
+DISK_TOTAL_GAUGE = Gauge("jetson_disk_total_mb",
+                         "Total disk space in MB",
+                         ["mount", "Hostname"])
 
 ########################################
 # 2) Aggregator: 每個傳感器 / 欄位都對應一個 list
@@ -202,6 +213,15 @@ class MetricsAggregator:
         JETSON_POWER_VDD_IN_W.labels(Hostname=MY_HOSTNAME).set(avg_list(self.vdd_in_records))
         JETSON_POWER_VDD_CPU_GPU_CV_W.labels(Hostname=MY_HOSTNAME).set(avg_list(self.vdd_cpu_gpu_cv_records))
         JETSON_POWER_VDD_SOC_W.labels(Hostname=MY_HOSTNAME).set(avg_list(self.vdd_soc_records))
+
+        # 4) 磁碟資訊 - 只監測 /host
+        try:
+            usage = psutil.disk_usage("/host")  # 監測宿主機的 /
+            DISK_USAGE_GAUGE.labels(mount="/", Hostname=MY_HOSTNAME).set(usage.percent)
+            DISK_USED_GAUGE.labels(mount="/", Hostname=MY_HOSTNAME).set(usage.used / 1e6)  # 轉 MB
+            DISK_TOTAL_GAUGE.labels(mount="/", Hostname=MY_HOSTNAME).set(usage.total / 1e6)  # 轉 MB
+        except PermissionError:
+            print("無法存取 /host，請確認是否正確掛載！")
 
         self.reset()
 
